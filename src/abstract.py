@@ -1,22 +1,22 @@
-import torch
-import torch.nn as nn
+from modules import Embedding, Linear, Norm, ReLU, Sequential
 
-class TransformerBase(nn.Module):
-    def __init__(self, vocab_size=1000, d_model=512, n_heads=4, d_ff=512 * 4):
+## Single head attn, no gradient graph for now. Write entirely in n
+
+class TransformerBase:
+    def __init__(self, vocab_size=1000, d_model=512, d_ff=512 * 4):
         super().__init__()
-        self.embedding = nn.Embedding(vocab_size, d_model)
-        self.n_heads = n_heads
-        self.q_proj = nn.Linear(d_model, d_model, bias=False)
-        self.k_proj = nn.Linear(d_model, d_model, bias=False)
-        self.v_proj = nn.Linear(d_model, d_model, bias=False)
+        self.embedding = Embedding(vocab_size, d_model)
+        self.q_proj = Linear(d_model, d_model, bias=False)
+        self.k_proj = Linear(d_model, d_model, bias=False)
+        self.v_proj = Linear(d_model, d_model, bias=False)
 
-        self.ffn = nn.Sequential(
-            nn.Linear(d_model, d_ff),
-            nn.ReLU(),
-            nn.Linear(d_ff, d_model)
+        self.ffn = Sequential(
+            Linear(d_model, d_ff),
+            ReLU(),
+            Linear(d_ff, d_model)
         )
-        self.norm1 = nn.LayerNorm(d_model)
-        self.norm2 = nn.LayerNorm(d_model)
+        self.norm1 = Norm(d_model)
+        self.norm2 = Norm(d_model)
 
-    def forward(self, x):
+    def __call__(self, x):
         raise NotImplementedError()
