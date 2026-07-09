@@ -31,8 +31,8 @@ class SelfAttention:
     
     def forward(self, x):
         # x: N D
-        q = np.dot(q, self.W_q)
-        k = np.dot(k, self.W_k)
+        q = np.dot(x, self.W_q)
+        k = np.dot(x, self.W_k)
         v = np.dot(x, self.W_v)
 
         d_k = x.shape[-1]
