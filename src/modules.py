@@ -1,18 +1,6 @@
 import numpy as np
 from numpy.random import default_rng
-
-def softmax(scores):
-    """
-    Apply softmax to normalize attention scores.
-
-    Args:
-        scores (np.ndarray): Attention scores.
-
-    Returns:
-        np.ndarray: Normalized attention scores.
-    """
-    exp_scores = np.exp(scores - np.max(scores, axis=-1, keepdims=True))  # numerical stability, and normalizes across each row (i.e. across all key vectors for each query)
-    return exp_scores / np.sum(exp_scores, axis=-1, keepdims=True)
+from backend import CPU
 
 class Embedding:
     def __init__(self, vocab_size, d_model):
@@ -24,10 +12,11 @@ class Embedding:
         return default_rng(self.seed).random((x.shape[1], self.d_model))
 
 class SelfAttention:
-    def __init__(self, d_model = 512):
+    def __init__(self, d_model = 512, backend = CPU):
         self.W_q = np.random.randn(d_model, d_model) * np.sqrt(1. / d_model)
         self.W_k = np.random.randn(d_model, d_model) * np.sqrt(1. / d_model)
         self.W_v = np.random.randn(d_model, d_model) * np.sqrt(1. / d_model)
+        self.backend = backend
     
     def forward(self, x):
         # x: N D
@@ -35,15 +24,8 @@ class SelfAttention:
         k = np.dot(x, self.W_k)
         v = np.dot(x, self.W_v)
 
-        d_k = x.shape[-1]
-        attn_scores = (q @ k.T) / np.sqrt(d_k)
-        attn_weights = softmax(attn_scores)
-        out = attn_weights @ v
-        return out
+        attn_scores = self.backend.scale(self.backend.matmul(q, k.T), x.shape[-1])
+        attn_weights = self.backend.softmax(attn_scores)
+        out = self.backend.matmul(attn_weights, v)
 
-class FFN:
-    def __init__(self, d_model = 512, d_ff = 512 * 4):
-        pass
-    
-    def forward(self, x):
-        raise NotImplementedError()
+        return out
