@@ -1,12 +1,8 @@
-import torch
 import torch.nn.functional as F
-
-from cpu_baseline import CpuPipeline
-
+from modules import SelfAttention
 
 def test_matches_torch_sdpa():
-    torch.manual_seed(0)
-    model = CpuPipeline().eval()
+    model = Transformer()
     x = torch.randint(0, 1000, (2, 16))  # [B, N] token ids
 
     with torch.no_grad():
