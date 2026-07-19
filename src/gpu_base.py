@@ -12,11 +12,13 @@ class GpuPipeline(TransformerBase):
     """
 
     def attention(self, q, k, v):
+        # detach: torch refuses __cuda_array_interface__ on tensors that
+        # require grad, and this pipeline is inference-only anyway
         out = torch.empty_like(q)
         for b in range(q.shape[0]):
-            res = self._attend(q[b].contiguous().cuda(),
-                               k[b].contiguous().cuda(),
-                               v[b].contiguous().cuda())
+            res = self._attend(q[b].detach().contiguous().cuda(),
+                               k[b].detach().contiguous().cuda(),
+                               v[b].detach().contiguous().cuda())
             cuda.synchronize()
             out[b] = res.cpu()
         return out
