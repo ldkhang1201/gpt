@@ -8,6 +8,7 @@ dependencies = [
     "torch>=2.12.1",
     "numba>=0.61",
     "matplotlib>=3.9",
+    "jupyter>=1.1.1",
 ]
 
 [dependency-groups]
