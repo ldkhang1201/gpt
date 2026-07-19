@@ -2,6 +2,7 @@ import time
 
 import torch
 import torch.nn.functional as F
+from numba import cuda
 from torch.profiler import ProfilerActivity, profile, record_function
 
 STEPS = ["1_embedding", "2a_qk_matmul", "2b_softmax", "2c_value_weighted_sum", "3_ffn"]
@@ -72,6 +73,65 @@ def sdpa_gpu_ms(model, n, reps=5):
             F.scaled_dot_product_attention(q.cuda(), k.cuda(), v.cuda()).cpu()
         torch.cuda.synchronize()
     return (time.perf_counter() - t0) / reps * 1e3
+
+
+def gpu_specs():
+    """Peak fp32 TFLOP/s and memory bandwidth, HW02 roofline style: device
+    query for SMs/cc, pynvml for clocks, known-family tables for bus width
+    and cores per SM — with a per-family fallback when pynvml is missing."""
+    gpu = cuda.get_current_device()
+    cc = tuple(gpu.compute_capability)
+    sm = gpu.MULTIPROCESSOR_COUNT
+    name = gpu.name.decode() if isinstance(gpu.name, bytes) else gpu.name
+    cores_per_sm = {(7, 0): 64, (7, 5): 64, (8, 0): 64,
+                    (8, 6): 128, (8, 9): 128, (9, 0): 128}.get(cc, 128)
+    try:
+        import pynvml
+        pynvml.nvmlInit()
+        h = pynvml.nvmlDeviceGetHandleByIndex(0)
+        sm_mhz = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_SM)
+        mem_mhz = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_MEM)
+        bus_bits = {(7, 0): 4096, (7, 5): 256, (8, 0): 5120,
+                    (8, 6): 384, (8, 9): 384, (9, 0): 6144}.get(cc, 256)
+        bw_gbs = mem_mhz * 1e6 * bus_bits / 8 * 2 / 1e9  # DDR: 2 transfers/clock
+        pynvml.nvmlShutdown()
+    except Exception:  # no pynvml: boost clock + bandwidth from spec sheets
+        sm_mhz, bw_gbs = {(7, 5): (1590, 300.0), (8, 0): (1410, 1555.0),
+                          (9, 0): (1785, 3900.0)}.get(cc, (1500, 500.0))
+    tflops = sm * cores_per_sm * 2 * sm_mhz * 1e6 / 1e12
+    return {"name": name, "sm": sm, "tflops": tflops, "bw_gbs": bw_gbs}
+
+
+def attention_kernel_ms(model, n, reps=5):
+    """Device-resident attention time via CUDA events (HW02's cuda_time_ms):
+    q/k/v already on the GPU, no transfers in the timed region."""
+    q, k, v = (t[0].detach().contiguous().cuda() for t in _qkv(model, n))
+    model._attend(q, k, v)  # warmup / JIT
+    cuda.synchronize()
+    start = cuda.event(timing=True)
+    end = cuda.event(timing=True)
+    start.record()
+    for _ in range(reps):
+        model._attend(q, k, v)
+    end.record()
+    end.synchronize()
+    return cuda.event_elapsed_time(start, end) / reps
+
+
+def sdpa_kernel_ms(model, n, reps=5):
+    """Device-resident torch SDPA time via CUDA events."""
+    q, k, v = (t.detach().cuda() for t in _qkv(model, n))
+    with torch.no_grad():
+        F.scaled_dot_product_attention(q, k, v)  # warmup
+        torch.cuda.synchronize()
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        for _ in range(reps):
+            F.scaled_dot_product_attention(q, k, v)
+        end.record()
+        torch.cuda.synchronize()
+    return start.elapsed_time(end) / reps
 
 
 def bench_attention(classes, seq_lens, reps=5):
