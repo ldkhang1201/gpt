@@ -10,10 +10,6 @@ from gpu_base import GpuPipeline
 TILE_N = 8   # K/V rows staged in shared memory per step: 2 * TILE_N * D * 4B <= 48 KB for D <= 768
 TILE_M = 64  # query rows (= threads) per block
 
-# finite stand-in for -inf (same pattern as gpu_v2): any real score exceeds it,
-# and exp(_NEG_BIG - s) underflows to 0, so the first key resets m and l cleanly
-_NEG_BIG = float32(-3.0e38)
-
 
 @lru_cache(maxsize=None)
 def _flash_kernel(D):
@@ -35,13 +31,11 @@ def _flash_kernel(D):
             for c in range(D):
                 qi[c] = q[i, c]
                 acc[c] = float32(0.)
-        m = _NEG_BIG
+        m = float32(-math.inf)
         l = float32(0.)
 
         for t in range(0, N, TILE_N):
-            # builtin min() does not type-resolve on the CUDA target here
-            # ("Signature mismatch: 2 argument types given, but function takes 1")
-            rows = N - t
+            rows = N - t  # builtin min() is unsupported in numba CUDA kernels
             if rows > TILE_N:
                 rows = TILE_N
 
