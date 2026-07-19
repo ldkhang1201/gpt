@@ -9,8 +9,12 @@ from gpu_base import GpuPipeline
 
 @cuda.jit
 def _matmul(a, b, out):
-    """out = a @ b — one thread per output element, all reads from global memory."""
-    i, j = cuda.grid(2)
+    """out = a @ b — one thread per output element, all reads from global memory.
+
+    threadIdx.x walks the output column (the contiguous axis) so warp reads
+    of b are coalesced; a[i, kk] is a broadcast within the warp.
+    """
+    j, i = cuda.grid(2)
     if i < out.shape[0] and j < out.shape[1]:
         acc = float32(0.)
         for kk in range(a.shape[1]):
@@ -20,7 +24,7 @@ def _matmul(a, b, out):
 
 @cuda.jit
 def _scale(x, num):
-    i, j = cuda.grid(2)
+    j, i = cuda.grid(2)
     if i < x.shape[0] and j < x.shape[1]:
         x[i, j] /= num
 
@@ -43,14 +47,16 @@ def _softmax(x, out):
 
 
 def _grid2d(rows, cols, tpb=(16, 16)):
-    return (math.ceil(rows / tpb[0]), math.ceil(cols / tpb[1])), tpb
+    # grid x covers columns, grid y covers rows (matches j, i = cuda.grid(2))
+    return (math.ceil(cols / tpb[0]), math.ceil(rows / tpb[1])), tpb
 
 
 class GpuV1(GpuPipeline):
     """V1 — naive three-kernel attention: QK^T matmul, softmax, weighted sum.
 
     Every intermediate, including the full N x N score matrix, round-trips
-    through global memory between kernels.
+    through global memory between kernels, and the softmax reads each row
+    three times with one thread per row.
     """
 
     def _attend(self, q, k, v):

@@ -17,22 +17,28 @@ _NEG_BIG = float32(-3.0e38)
 @cuda.jit
 def _qkt_tiled(q, k, scale, out):
     """out[i, j] = scale * dot(q[i], k[j]) — QK^T with both operand tiles
-    staged in shared memory; the 1/sqrt(D) scaling is fused into the epilogue."""
-    sq = cuda.shared.array((TILE, TILE), float32)
-    sk = cuda.shared.array((TILE, TILE), float32)
+    staged in shared memory; the 1/sqrt(D) scaling is fused into the epilogue.
 
-    i, j = cuda.grid(2)
-    ti = cuda.threadIdx.x
-    tj = cuda.threadIdx.y
+    threadIdx.x walks the contiguous axis of q and k, so all global loads are
+    coalesced; the +1 column pad keeps the sk reads free of bank conflicts.
+    """
+    sq = cuda.shared.array((TILE, TILE + 1), float32)
+    sk = cuda.shared.array((TILE, TILE + 1), float32)
+
+    tx = cuda.threadIdx.x
+    ty = cuda.threadIdx.y
+    j = cuda.blockIdx.x * TILE + tx   # output column
+    i = cuda.blockIdx.y * TILE + ty   # output row
+    jr = cuda.blockIdx.x * TILE + ty  # k row staged by this thread
     N, D = q.shape
 
     acc = float32(0.)
     for t in range(0, D, TILE):
-        sq[ti, tj] = q[i, t + tj] if i < N and t + tj < D else float32(0.)
-        sk[tj, ti] = k[j, t + ti] if j < N and t + ti < D else float32(0.)
+        sq[ty, tx] = q[i, t + tx] if i < N and t + tx < D else float32(0.)
+        sk[ty, tx] = k[jr, t + tx] if jr < N and t + tx < D else float32(0.)
         cuda.syncthreads()
         for kk in range(TILE):
-            acc += sq[ti, kk] * sk[tj, kk]
+            acc += sq[ty, kk] * sk[tx, kk]
         cuda.syncthreads()
 
     if i < N and j < N:
@@ -42,22 +48,23 @@ def _qkt_tiled(q, k, scale, out):
 @cuda.jit
 def _matmul_tiled(a, b, out):
     """out = a @ b with shared-memory tiling (used for weights @ V)."""
-    sa = cuda.shared.array((TILE, TILE), float32)
-    sb = cuda.shared.array((TILE, TILE), float32)
+    sa = cuda.shared.array((TILE, TILE + 1), float32)
+    sb = cuda.shared.array((TILE, TILE + 1), float32)
 
-    i, j = cuda.grid(2)
-    ti = cuda.threadIdx.x
-    tj = cuda.threadIdx.y
+    tx = cuda.threadIdx.x
+    ty = cuda.threadIdx.y
+    j = cuda.blockIdx.x * TILE + tx   # output column
+    i = cuda.blockIdx.y * TILE + ty   # output row
     M, K = a.shape
     P = b.shape[1]
 
     acc = float32(0.)
     for t in range(0, K, TILE):
-        sa[ti, tj] = a[i, t + tj] if i < M and t + tj < K else float32(0.)
-        sb[ti, tj] = b[t + ti, j] if t + ti < K and j < P else float32(0.)
+        sa[ty, tx] = a[i, t + tx] if i < M and t + tx < K else float32(0.)
+        sb[ty, tx] = b[t + ty, j] if t + ty < K and j < P else float32(0.)
         cuda.syncthreads()
         for kk in range(TILE):
-            acc += sa[ti, kk] * sb[kk, tj]
+            acc += sa[ty, kk] * sb[kk, tx]
         cuda.syncthreads()
 
     if i < M and j < P:
@@ -71,7 +78,8 @@ def _softmax_online(x, out):
     One block per row. Each thread keeps a running (max, sum) over its slice,
     rescaling the sum whenever the max moves (log-sum-exp trick), so max and
     sum come out of a single pass. Partials merge in shared memory, then a
-    second pass normalises and writes.
+    second pass normalises and writes. All accesses are coalesced (adjacent
+    threads read adjacent columns).
     """
     row = cuda.blockIdx.x
     tid = cuda.threadIdx.x
@@ -115,8 +123,8 @@ class GpuV2(GpuPipeline):
     """V2 — tiled QK^T in shared memory + online softmax.
 
     Still materialises the N x N score matrix, but each element of Q and K is
-    read from global memory D/TILE times less, and the softmax saves one full
-    read of the score matrix.
+    read from global memory TILE (16x) times less, and the softmax saves one
+    full read of the score matrix.
     """
 
     def _attend(self, q, k, v):
@@ -132,6 +140,6 @@ class GpuV2(GpuPipeline):
 
         _softmax_online[N, TPB](scores, weights)
 
-        bpg = (math.ceil(N / TILE), math.ceil(D / TILE))
+        bpg = (math.ceil(D / TILE), math.ceil(N / TILE))  # (cols, rows)
         _matmul_tiled[bpg, tpb](weights, v, out)
         return out

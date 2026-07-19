@@ -81,4 +81,6 @@ def bench_attention(classes, seq_lens, reps=5):
         for name, cls in classes.items():
             model = cls().eval()
             times[name].append(attention_ms(model, n, reps))
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()  # drop cached N x N blocks between runs
     return times
