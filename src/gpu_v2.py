@@ -1,0 +1,137 @@
+import math
+
+import numpy as np
+import torch
+from numba import cuda, float32
+
+from gpu_base import GpuPipeline
+
+TILE = 16   # tile edge for the shared-memory matmuls
+TPB = 128   # threads cooperating on one row in the online softmax
+
+# finite stand-in for -inf: avoids (-inf) - (-inf) = nan when merging two
+# partials that saw no elements
+_NEG_BIG = float32(-3.0e38)
+
+
+@cuda.jit
+def _qkt_tiled(q, k, scale, out):
+    """out[i, j] = scale * dot(q[i], k[j]) — QK^T with both operand tiles
+    staged in shared memory; the 1/sqrt(D) scaling is fused into the epilogue."""
+    sq = cuda.shared.array((TILE, TILE), float32)
+    sk = cuda.shared.array((TILE, TILE), float32)
+
+    i, j = cuda.grid(2)
+    ti = cuda.threadIdx.x
+    tj = cuda.threadIdx.y
+    N, D = q.shape
+
+    acc = float32(0.)
+    for t in range(0, D, TILE):
+        sq[ti, tj] = q[i, t + tj] if i < N and t + tj < D else float32(0.)
+        sk[tj, ti] = k[j, t + ti] if j < N and t + ti < D else float32(0.)
+        cuda.syncthreads()
+        for kk in range(TILE):
+            acc += sq[ti, kk] * sk[tj, kk]
+        cuda.syncthreads()
+
+    if i < N and j < N:
+        out[i, j] = acc * scale
+
+
+@cuda.jit
+def _matmul_tiled(a, b, out):
+    """out = a @ b with shared-memory tiling (used for weights @ V)."""
+    sa = cuda.shared.array((TILE, TILE), float32)
+    sb = cuda.shared.array((TILE, TILE), float32)
+
+    i, j = cuda.grid(2)
+    ti = cuda.threadIdx.x
+    tj = cuda.threadIdx.y
+    M, K = a.shape
+    P = b.shape[1]
+
+    acc = float32(0.)
+    for t in range(0, K, TILE):
+        sa[ti, tj] = a[i, t + tj] if i < M and t + tj < K else float32(0.)
+        sb[ti, tj] = b[t + ti, j] if t + ti < K and j < P else float32(0.)
+        cuda.syncthreads()
+        for kk in range(TILE):
+            acc += sa[ti, kk] * sb[kk, tj]
+        cuda.syncthreads()
+
+    if i < M and j < P:
+        out[i, j] = acc
+
+
+@cuda.jit
+def _softmax_online(x, out):
+    """Row softmax in two reads of the row instead of three.
+
+    One block per row. Each thread keeps a running (max, sum) over its slice,
+    rescaling the sum whenever the max moves (log-sum-exp trick), so max and
+    sum come out of a single pass. Partials merge in shared memory, then a
+    second pass normalises and writes.
+    """
+    row = cuda.blockIdx.x
+    tid = cuda.threadIdx.x
+    n = x.shape[1]
+
+    sm = cuda.shared.array(TPB, float32)
+    sl = cuda.shared.array(TPB, float32)
+
+    m = _NEG_BIG
+    l = float32(0.)
+    for j in range(tid, n, TPB):
+        val = x[row, j]
+        if val > m:
+            l *= math.exp(m - val)  # rescale the sum accumulated so far
+            m = val
+        l += math.exp(val - m)
+    sm[tid] = m
+    sl[tid] = l
+    cuda.syncthreads()
+
+    stride = TPB // 2
+    while stride > 0:
+        if tid < stride:
+            m2 = sm[tid + stride]
+            l2 = sl[tid + stride]
+            if m2 > sm[tid]:
+                sl[tid] = sl[tid] * math.exp(sm[tid] - m2) + l2
+                sm[tid] = m2
+            else:
+                sl[tid] += l2 * math.exp(m2 - sm[tid])
+        cuda.syncthreads()
+        stride //= 2
+
+    m = sm[0]
+    l = sl[0]
+    for j in range(tid, n, TPB):
+        out[row, j] = math.exp(x[row, j] - m) / l
+
+
+class GpuV2(GpuPipeline):
+    """V2 — tiled QK^T in shared memory + online softmax.
+
+    Still materialises the N x N score matrix, but each element of Q and K is
+    read from global memory D/TILE times less, and the softmax saves one full
+    read of the score matrix.
+    """
+
+    def _attend(self, q, k, v):
+        N, D = q.shape
+        scores = torch.empty((N, N), device=q.device)
+        weights = torch.empty((N, N), device=q.device)
+        out = torch.empty((N, D), device=q.device)
+
+        tpb = (TILE, TILE)
+        bpg = (math.ceil(N / TILE), math.ceil(N / TILE))
+        # np.float32 keeps the kernel arithmetic in fp32 (a python float is typed float64)
+        _qkt_tiled[bpg, tpb](q, k, np.float32(1.0 / D ** 0.5), scores)
+
+        _softmax_online[N, TPB](scores, weights)
+
+        bpg = (math.ceil(N / TILE), math.ceil(D / TILE))
+        _matmul_tiled[bpg, tpb](weights, v, out)
+        return out
