@@ -6,7 +6,9 @@ from numba import cuda, float32
 
 from gpu_base import GpuPipeline
 
-TILE = 16   # tile edge for the shared-memory matmuls
+TILE = 16          # tile edge for the shared-memory matmuls
+TILE_P = TILE + 1  # padded tile width: numba wants a plain constant in
+                   # cuda.shared.array, and the pad avoids bank conflicts
 TPB = 128   # threads cooperating on one row in the online softmax
 
 # finite stand-in for -inf: avoids (-inf) - (-inf) = nan when merging two
@@ -22,8 +24,8 @@ def _qkt_tiled(q, k, scale, out):
     threadIdx.x walks the contiguous axis of q and k, so all global loads are
     coalesced; the +1 column pad keeps the sk reads free of bank conflicts.
     """
-    sq = cuda.shared.array((TILE, TILE + 1), float32)
-    sk = cuda.shared.array((TILE, TILE + 1), float32)
+    sq = cuda.shared.array((TILE, TILE_P), float32)
+    sk = cuda.shared.array((TILE, TILE_P), float32)
 
     tx = cuda.threadIdx.x
     ty = cuda.threadIdx.y
@@ -48,8 +50,8 @@ def _qkt_tiled(q, k, scale, out):
 @cuda.jit
 def _matmul_tiled(a, b, out):
     """out = a @ b with shared-memory tiling (used for weights @ V)."""
-    sa = cuda.shared.array((TILE, TILE + 1), float32)
-    sb = cuda.shared.array((TILE, TILE + 1), float32)
+    sa = cuda.shared.array((TILE, TILE_P), float32)
+    sb = cuda.shared.array((TILE, TILE_P), float32)
 
     tx = cuda.threadIdx.x
     ty = cuda.threadIdx.y
