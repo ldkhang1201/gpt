@@ -91,8 +91,11 @@ def gpu_specs():
         h = pynvml.nvmlDeviceGetHandleByIndex(0)
         sm_mhz = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_SM)
         mem_mhz = pynvml.nvmlDeviceGetMaxClockInfo(h, pynvml.NVML_CLOCK_MEM)
-        bus_bits = {(7, 0): 4096, (7, 5): 256, (8, 0): 5120,
-                    (8, 6): 384, (8, 9): 384, (9, 0): 6144}.get(cc, 256)
+        try:
+            bus_bits = pynvml.nvmlDeviceGetMemoryBusWidth(h)
+        except pynvml.NVMLError:  # per-family fallback
+            bus_bits = {(7, 0): 4096, (7, 5): 256, (8, 0): 5120,
+                        (8, 6): 384, (8, 9): 384, (9, 0): 6144}.get(cc, 256)
         bw_gbs = mem_mhz * 1e6 * bus_bits / 8 * 2 / 1e9  # DDR: 2 transfers/clock
         pynvml.nvmlShutdown()
     except Exception:  # no pynvml: boost clock + bandwidth from spec sheets
