@@ -1,5 +1,8 @@
 # B3 · Transformer Attention Mechanism
 
+**[Full project report → REPORT.md](REPORT.md)** — bottleneck analysis, kernel
+design, timing methodology, metrics, charts, and insights.
+
 Scaled dot-product attention implemented from scratch with numba CUDA and
 optimised in three steps. Everything except attention (embedding, projections,
 layer norms, FFN) stays in PyTorch on the CPU — only the profiled bottleneck
