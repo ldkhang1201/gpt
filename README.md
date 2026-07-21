@@ -11,6 +11,7 @@ is replaced.
 | Version | File | Key idea |
 |---|---|---|
 | `CpuPipeline` | `src/cpu_baseline.py` | PyTorch reference + timing baseline |
+| `CpuNaivePipeline` | `src/cpu_naive.py` | bare Python triple loops — the naive baseline behind published "1000×" claims |
 | `GpuV1` | `src/gpu_v1.py` | naive three-kernel attention, everything through global memory |
 | `GpuV2` | `src/gpu_v2.py` | tiled QKᵀ in shared memory + single-pass online softmax |
 | `GpuV3` | `src/gpu_v3.py` | FlashAttention-style fused kernel, never materialises the N×N matrix |
@@ -19,7 +20,7 @@ is replaced.
 
 - `src/abstract.py` — shared transformer block; subclasses implement `attention`
 - `src/bench.py` — profiling and timing helpers
-- `notebooks/attention.ipynb` — report: bottleneck profile, correctness checks, benchmarks, charts
+- `demo.ipynb` — report: bottleneck profile, correctness checks, benchmarks, charts
 - `tests/test_correctness.py` — every version vs `torch` SDPA (GPU tests auto-skip without CUDA)
 
 ## Run
