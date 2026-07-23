@@ -4,7 +4,6 @@ from numba import cuda
 
 from bench import sdpa_reference
 from cpu_baseline import CpuPipeline
-from cpu_naive import CpuNaivePipeline
 from gpu_v1 import GpuV1
 from gpu_v2 import GpuV2
 from gpu_v3 import GpuV3
@@ -22,11 +21,7 @@ def _check(cls, atol=None, rtol=None):
 
 
 def test_cpu_matches_torch_sdpa():
-    _check(CpuPipeline)
-
-
-def test_naive_cpu_matches_torch_sdpa():
-    _check(CpuNaivePipeline, atol=1e-4, rtol=1e-3)  # fp64 python floats vs fp32 torch
+    _check(CpuPipeline, atol=1e-4, rtol=1e-3)  # fp64 python floats vs fp32 torch
 
 
 @needs_gpu

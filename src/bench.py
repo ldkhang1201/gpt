@@ -28,11 +28,16 @@ def sdpa_reference(model, x):
         return model.norm2(h + model.ffn(h))
 
 
-def step_percentages(model, n):
-    """% of one forward pass spent in each labelled step (torch.profiler)."""
+def step_percentages(model, n, warmup=True):
+    """% of one forward pass spent in each labelled step (torch.profiler).
+
+    Pass warmup=False for pure-Python models: nothing to JIT, and one extra
+    forward costs seconds to minutes.
+    """
     x = _tokens(model, n)
     with torch.no_grad():
-        model(x)  # warmup (first GPU call pays numba JIT compilation)
+        if warmup:
+            model(x)  # warmup (first GPU call pays numba JIT compilation)
         with profile(activities=[ProfilerActivity.CPU]) as prof:
             with record_function("0_total"):
                 model(x)
