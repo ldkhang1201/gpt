@@ -29,21 +29,57 @@ def _scale(x, num):
         x[i, j] /= num
 
 
+TPB = 256  # threads cooperating on one row
+
+
 @cuda.jit
 def _softmax(x, out):
-    """Row softmax, one thread per row: max pass, sum pass, write pass."""
-    i = cuda.grid(1)
-    if i < x.shape[0]:
-        # row max for numerical stability (avoid exp overflow)
-        m = x[i, 0]
-        for j in range(1, x.shape[1]):
-            if x[i, j] > m:
-                m = x[i, j]
-        denom = float32(0.)
-        for j in range(x.shape[1]):
-            denom += math.exp(x[i, j] - m)
-        for j in range(x.shape[1]):
-            out[i, j] = math.exp(x[i, j] - m) / denom
+    """Row softmax, one block per row: max pass, sum pass, write pass.
+
+    Each thread strides over its slice of the row; the block reduces the
+    per-thread max and sum in shared memory. Still three reads of the row
+    (naive), but the row is now processed cooperatively instead of by a
+    single thread.
+    """
+    row = cuda.blockIdx.x
+    tid = cuda.threadIdx.x
+    n = x.shape[1]
+
+    sm = cuda.shared.array(TPB, float32)
+    sd = cuda.shared.array(TPB, float32)
+
+    # row max for numerical stability (avoid exp overflow)
+    m = x[row, tid] if tid < n else float32(-3.0e38)
+    for j in range(tid + TPB, n, TPB):
+        if x[row, j] > m:
+            m = x[row, j]
+    sm[tid] = m
+    cuda.syncthreads()
+
+    stride = TPB // 2
+    while stride > 0:
+        if tid < stride and sm[tid + stride] > sm[tid]:
+            sm[tid] = sm[tid + stride]
+        cuda.syncthreads()
+        stride //= 2
+    m = sm[0]
+
+    d = float32(0.)
+    for j in range(tid, n, TPB):
+        d += math.exp(x[row, j] - m)
+    sd[tid] = d
+    cuda.syncthreads()
+
+    stride = TPB // 2
+    while stride > 0:
+        if tid < stride:
+            sd[tid] += sd[tid + stride]
+        cuda.syncthreads()
+        stride //= 2
+    denom = sd[0]
+
+    for j in range(tid, n, TPB):
+        out[row, j] = math.exp(x[row, j] - m) / denom
 
 
 def _grid2d(rows, cols, tpb=(16, 16)):
@@ -70,7 +106,7 @@ class GpuV1(GpuPipeline):
         # np.float32 keeps the kernel arithmetic in fp32 (a python float is typed float64)
         _scale[bpg, tpb](scores, np.float32(D ** 0.5))
 
-        _softmax[math.ceil(N / 256), 256](scores, weights)
+        _softmax[N, TPB](scores, weights)
 
         bpg, tpb = _grid2d(N, D)
         _matmul[bpg, tpb](weights, v, out)
