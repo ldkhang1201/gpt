@@ -6,6 +6,10 @@ readme = "README.md"
 requires-python = ">=3.12"
 dependencies = [
     "torch>=2.12.1",
+    "numba>=0.61",
+    "matplotlib>=3.9",
+    "jupyter>=1.1.1",
+    "nvidia-ml-py>=13.610.43",
 ]
 
 [dependency-groups]

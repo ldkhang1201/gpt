@@ -1,21 +1,35 @@
+import pytest
 import torch
-import torch.nn.functional as F
+from numba import cuda
 
+from bench import sdpa_reference
 from cpu_baseline import CpuPipeline
+from cpu_naive import CpuNaivePipeline
+from gpu_v1 import GpuV1
+from gpu_v2 import GpuV2
+from gpu_v3 import GpuV3
+
+needs_gpu = pytest.mark.skipif(not cuda.is_available(), reason="no CUDA device")
 
 
-def test_matches_torch_sdpa():
+def _check(cls, atol=None, rtol=None):
     torch.manual_seed(0)
-    model = CpuPipeline().eval()
+    model = cls().eval()
     x = torch.randint(0, 1000, (2, 16))  # [B, N] token ids
-
     with torch.no_grad():
         out = model(x)
+    torch.testing.assert_close(out, sdpa_reference(model, x), atol=atol, rtol=rtol)
 
-        # same weights, attention via torch (SDPA scale = 1/sqrt(d_model) = your /D**0.5)
-        h = model.embedding(x)
-        attn = F.scaled_dot_product_attention(model.q_proj(h), model.k_proj(h), model.v_proj(h))
-        h = model.norm1(h + attn)
-        ref = model.norm2(h + model.ffn(h))
 
-    torch.testing.assert_close(out, ref)
+def test_cpu_matches_torch_sdpa():
+    _check(CpuPipeline)
+
+
+def test_naive_cpu_matches_torch_sdpa():
+    _check(CpuNaivePipeline, atol=1e-4, rtol=1e-3)  # fp64 python floats vs fp32 torch
+
+
+@needs_gpu
+@pytest.mark.parametrize("cls", [GpuV1, GpuV2, GpuV3])
+def test_gpu_matches_torch_sdpa(cls):
+    _check(cls, atol=1e-4, rtol=1e-3)  # assignment spec: within 1e-4
