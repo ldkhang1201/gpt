@@ -1,7 +1,6 @@
 import math
 
 import numpy as np
-import torch
 from numba import cuda, float32
 
 from gpu_base import GpuPipeline
@@ -129,19 +128,16 @@ class GpuV2(GpuPipeline):
     full read of the score matrix.
     """
 
-    def _attend(self, q, k, v):
+    def _step_qkt(self, q, k, scores):
         N, D = q.shape
-        scores = torch.empty((N, N), device=q.device)
-        weights = torch.empty((N, N), device=q.device)
-        out = torch.empty((N, D), device=q.device)
-
-        tpb = (TILE, TILE)
         bpg = (math.ceil(N / TILE), math.ceil(N / TILE))
         # np.float32 keeps the kernel arithmetic in fp32 (a python float is typed float64)
-        _qkt_tiled[bpg, tpb](q, k, np.float32(1.0 / D ** 0.5), scores)
+        _qkt_tiled[bpg, (TILE, TILE)](q, k, np.float32(1.0 / D ** 0.5), scores)
 
-        _softmax_online[N, TPB](scores, weights)
+    def _step_softmax(self, scores, weights):
+        _softmax_online[scores.shape[0], TPB](scores, weights)
 
+    def _step_weighted_sum(self, weights, v, out):
+        N, D = out.shape
         bpg = (math.ceil(D / TILE), math.ceil(N / TILE))  # (cols, rows)
-        _matmul_tiled[bpg, tpb](weights, v, out)
-        return out
+        _matmul_tiled[bpg, (TILE, TILE)](weights, v, out)

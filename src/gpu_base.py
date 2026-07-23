@@ -24,5 +24,28 @@ class GpuPipeline(TransformerBase):
         return out
 
     def _attend(self, q, k, v):
-        """Attention for one sequence, on device: [N, D] x3 -> [N, D]."""
+        """Attention for one sequence, on device: [N, D] x3 -> [N, D].
+
+        Default: the unfused three-step pipeline, each step a separately
+        timeable method. Fused versions override _attend wholesale.
+        """
+        N, D = q.shape
+        scores = torch.empty((N, N), device=q.device)
+        weights = torch.empty((N, N), device=q.device)
+        out = torch.empty((N, D), device=q.device)
+        self._step_qkt(q, k, scores)
+        self._step_softmax(scores, weights)
+        self._step_weighted_sum(weights, v, out)
+        return out
+
+    def _step_qkt(self, q, k, scores):
+        """scores = (q @ k^T) / sqrt(D), on device."""
+        raise NotImplementedError()
+
+    def _step_softmax(self, scores, weights):
+        """weights = row softmax of scores, on device."""
+        raise NotImplementedError()
+
+    def _step_weighted_sum(self, weights, v, out):
+        """out = weights @ v, on device."""
         raise NotImplementedError()

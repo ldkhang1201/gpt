@@ -7,6 +7,9 @@ from torch.profiler import ProfilerActivity, profile, record_function
 
 STEPS = ["1_embedding", "2a_qk_matmul", "2b_softmax", "2c_value_weighted_sum", "3_ffn"]
 ATTN_STEPS = STEPS[1:4]
+# coarse variant: attention as one step, so pipelines without the 2a/2b/2c
+# sub-step labels (the GPU versions) are comparable
+STEPS_TOTAL = ["1_embedding", "2_attention_total", "3_ffn"]
 
 
 def _tokens(model, n, batch=1):
@@ -28,7 +31,7 @@ def sdpa_reference(model, x):
         return model.norm2(h + model.ffn(h))
 
 
-def step_percentages(model, n, warmup=True):
+def step_percentages(model, n, warmup=True, steps=STEPS):
     """% of one forward pass spent in each labelled step (torch.profiler).
 
     Pass warmup=False for pure-Python models: nothing to warm up, and one
@@ -46,9 +49,27 @@ def step_percentages(model, n, warmup=True):
         return max((e.cpu_time_total for e in prof.key_averages() if e.key == key), default=0.0)
 
     total = t("0_total")
-    pct = {s: 100.0 * t(s) / total for s in STEPS}
+    pct = {s: 100.0 * t(s) / total for s in steps}
     pct["other"] = 100.0 - sum(pct.values())
     return pct
+
+
+def attention_step_ms(model, n):
+    """Absolute ms of each attention sub-step, from one profiled pass over
+    the record_function labels inside the model's attention. One pass, no
+    warmup — meant for the pure-Python CPU model, where a pass costs minutes
+    and there is nothing to warm up. Assumes batch=1 (what _qkv provides):
+    key_averages sums duplicate labels, so batch>1 would fold all sequences
+    into one number."""
+    q, k, v = _qkv(model, n)
+    with torch.no_grad():
+        with profile(activities=[ProfilerActivity.CPU]) as prof:
+            model.attention(q, k, v)
+
+    def t(key):
+        return max((e.cpu_time_total for e in prof.key_averages() if e.key == key), default=0.0)
+
+    return {s: t(s) / 1e3 for s in ATTN_STEPS}  # profiler reports microseconds
 
 
 def attention_ms(model, n, reps=5, warmup=True):
@@ -127,6 +148,35 @@ def attention_kernel_ms(model, n, reps=5):
     end.record()
     end.synchronize()
     return cuda.event_elapsed_time(start, end) / reps
+
+
+def attention_kernel_step_ms(model, n, reps=5):
+    """Device-resident time (ms) of each attention step via CUDA events.
+
+    Runs the steps in pipeline order so each timed step reads real data
+    left behind by the previous one."""
+    q, k, v = (t[0].detach().contiguous().cuda() for t in _qkv(model, n))
+    N, D = q.shape
+    scores = torch.empty((N, N), device=q.device)
+    weights = torch.empty((N, N), device=q.device)
+    out = torch.empty((N, D), device=q.device)
+    steps = {"2a_qk_matmul": lambda: model._step_qkt(q, k, scores),
+             "2b_softmax": lambda: model._step_softmax(scores, weights),
+             "2c_value_weighted_sum": lambda: model._step_weighted_sum(weights, v, out)}
+
+    times = {}
+    for name, fn in steps.items():
+        fn()  # warmup / JIT; also fills the buffer the next step reads
+        cuda.synchronize()
+        start = cuda.event(timing=True)
+        end = cuda.event(timing=True)
+        start.record()
+        for _ in range(reps):
+            fn()
+        end.record()
+        end.synchronize()
+        times[name] = cuda.event_elapsed_time(start, end) / reps
+    return times
 
 
 def sdpa_kernel_ms(model, n, reps=5):

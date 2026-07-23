@@ -1,7 +1,6 @@
 import math
 
 import numpy as np
-import torch
 from numba import cuda, float32
 
 from gpu_base import GpuPipeline
@@ -95,19 +94,16 @@ class GpuV1(GpuPipeline):
     three times with one thread per row.
     """
 
-    def _attend(self, q, k, v):
+    def _step_qkt(self, q, k, scores):
         N, D = q.shape
-        scores = torch.empty((N, N), device=q.device)
-        weights = torch.empty((N, N), device=q.device)
-        out = torch.empty((N, D), device=q.device)
-
         bpg, tpb = _grid2d(N, N)
         _matmul[bpg, tpb](q, k.t().contiguous(), scores)
         # np.float32 keeps the kernel arithmetic in fp32 (a python float is typed float64)
         _scale[bpg, tpb](scores, np.float32(D ** 0.5))
 
-        _softmax[N, TPB](scores, weights)
+    def _step_softmax(self, scores, weights):
+        _softmax[scores.shape[0], TPB](scores, weights)
 
-        bpg, tpb = _grid2d(N, D)
+    def _step_weighted_sum(self, weights, v, out):
+        bpg, tpb = _grid2d(*out.shape)
         _matmul[bpg, tpb](weights, v, out)
-        return out
