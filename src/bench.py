@@ -46,15 +46,18 @@ def step_percentages(model, n):
     return pct
 
 
-def attention_ms(model, n, reps=5):
+def attention_ms(model, n, reps=5, warmup=True):
     """Average wall time (ms) of one attention step on precomputed q, k, v.
 
     GPU pipelines synchronize and copy back to CPU inside `attention`, so
     a wall clock around the call is correct and includes the transfer cost.
+    Pass warmup=False for pure-Python models: nothing to JIT, and one extra
+    pass costs seconds to minutes.
     """
     q, k, v = _qkv(model, n)
     with torch.no_grad():
-        model.attention(q, k, v)  # warmup / JIT
+        if warmup:
+            model.attention(q, k, v)  # warmup / JIT
         t0 = time.perf_counter()
         for _ in range(reps):
             model.attention(q, k, v)
